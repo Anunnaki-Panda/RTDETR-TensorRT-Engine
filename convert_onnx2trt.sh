@@ -1,0 +1,1 @@
+ /usr/local/TensorRT-10.0.1.6/bin/trtexec --onnx=model.onnx --saveEngine=model.trt

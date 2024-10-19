@@ -5,6 +5,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <fstream>
 
 // 共享资源
 std::mutex mtx;
@@ -51,7 +52,7 @@ void preprocess(const std::string &image_path, std::vector<float> &img_vec, cv::
 // 推理函数
 void infer_process(infer_framework &infer, void *input_images_Device, void *input_orig_target_sizes_Device,
                    void *output_output_labels_Device, void *output_box_device, void *output_scores_device,
-                   std::vector<int> &output_output_labels_Data, std::vector<float> &output_box_data,
+                   std::vector<long> &output_output_labels_Data, std::vector<float> &output_box_data,
                    std::vector<float> &output_score_data, int output_output_labels_Size,
                    int outout_box_size, int output_scores_size, std::vector<float> &img_vec, int input_images_Size) {
     // 等待数据准备好
@@ -62,6 +63,9 @@ void infer_process(infer_framework &infer, void *input_images_Device, void *inpu
 
     // 数据准备好后，开始推理
     cudaMemcpy(input_images_Device, img_vec.data(), input_images_Size * sizeof(float), cudaMemcpyHostToDevice);
+    std::ofstream out("input_images_Device.bin", std::ios::binary);
+    out.write(reinterpret_cast<char *>(input_images_Device), sizeof(float) * input_images_Size);
+    out.close();
 
     infer.context->setTensorAddress("images", input_images_Device);
     infer.context->setTensorAddress("orig_target_sizes", input_orig_target_sizes_Device);
@@ -85,7 +89,7 @@ void infer_process(infer_framework &infer, void *input_images_Device, void *inpu
     }
 
     // 拷贝输出数据回 Host
-    cudaMemcpy(output_output_labels_Data.data(), output_output_labels_Device, output_output_labels_Size * sizeof(int),
+    cudaMemcpy(output_output_labels_Data.data(), output_output_labels_Device, output_output_labels_Size * sizeof(long),
                cudaMemcpyDeviceToHost);
     cudaMemcpy(output_box_data.data(), output_box_device, outout_box_size * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(output_score_data.data(), output_scores_device, output_scores_size * sizeof(float),
@@ -94,53 +98,66 @@ void infer_process(infer_framework &infer, void *input_images_Device, void *inpu
 
 int main() {
     infer_framework infer;
+    auto y = infer.engine->getNbIOTensors();
+    for (auto i = 0; i < y; i++) {
+        auto x = infer.engine->getIOTensorName(i);
+        std::cout << std::string(x) << std::endl;
+    }
 
-    const int input_images_Index = infer.engine->getBindingIndex("images");
-    const int input_orig_target_sizes_Index = infer.engine->getBindingIndex("orig_target_sizes");
-    const int output_labels_Index = infer.engine->getBindingIndex("labels");
-    const int output_boxes_Index = infer.engine->getBindingIndex("boxes");
-    const int output_scores_Index = infer.engine->getBindingIndex("scores");
 
-    const int batchSize = 1;
-    const int input_images_Size = batchSize * infer.engine->getBindingDimensions(input_images_Index).d[0] *
-                                  infer.engine->getBindingDimensions(input_images_Index).d[1] *
-                                  infer.engine->getBindingDimensions(input_images_Index).d[2] *
-                                  infer.engine->getBindingDimensions(input_images_Index).d[3];
+    const char *input_images_Name = "images";
+    const char *input_orig_target_sizes_Name = "orig_target_sizes";
+    const char *output_labels_Name = "labels";
+    const char *output_boxes_Name = "boxes";
+    const char *output_scores_Name = "scores";
+
 
     std::vector<float> img_vec;
 
-    // 分配设备内存
+    const int batchSize = 1;
+
+    nvinfer1::Dims input_images_Dims = infer.engine->getTensorShape(input_images_Name);
+    const int input_images_Size = batchSize * input_images_Dims.d[0] * input_images_Dims.d[1] *
+                                  input_images_Dims.d[2] * input_images_Dims.d[3];
+
     void *input_images_Device;
-    cudaMalloc(&input_images_Device, input_images_Size * sizeof(float));
+    cudaMallocManaged(&input_images_Device, input_images_Size * sizeof(float));
 
-    const int input_orig_target_sizes_Size = batchSize * infer.engine->getBindingDimensions(
-            input_orig_target_sizes_Index).d[0] *
-                                             infer.engine->getBindingDimensions(input_orig_target_sizes_Index).d[1];
-    std::vector<int> input_orig_target_sizes_Data(input_orig_target_sizes_Size, 640);
+    nvinfer1::Dims input_orig_target_sizes_Dims = infer.engine->getTensorShape(input_orig_target_sizes_Name);
+    const int input_orig_target_sizes_Size = batchSize * input_orig_target_sizes_Dims.d[0] *
+                                             input_orig_target_sizes_Dims.d[1];
+
+    std::vector<long> input_orig_target_sizes_Data(input_orig_target_sizes_Size, 640);
+    std::ofstream out1("input_orig_target_sizes_Device.bin", std::ios::binary);
+    out1.write(reinterpret_cast<char *>(input_orig_target_sizes_Data.data()),
+               sizeof(long) * input_orig_target_sizes_Size);
+    out1.close();
+
     void *input_orig_target_sizes_Device;
-    cudaMalloc(&input_orig_target_sizes_Device, input_orig_target_sizes_Size * sizeof(int));
+    cudaMallocManaged(&input_orig_target_sizes_Device, input_orig_target_sizes_Size * sizeof(long));
     cudaMemcpy(input_orig_target_sizes_Device, input_orig_target_sizes_Data.data(),
-               input_orig_target_sizes_Size * sizeof(int), cudaMemcpyHostToDevice);
+               input_orig_target_sizes_Size * sizeof(long), cudaMemcpyHostToDevice);
 
-    const int output_output_labels_Size = batchSize * infer.engine->getBindingDimensions(output_labels_Index).d[1];
-    std::vector<int> output_output_labels_Data(output_output_labels_Size);
+    nvinfer1::Dims output_labels_Dims = infer.engine->getTensorShape(output_labels_Name);
+    const int output_output_labels_Size = batchSize * output_labels_Dims.d[1];
+    std::vector<long> output_output_labels_Data(output_output_labels_Size);
     void *output_output_labels_Device;
-    cudaMallocManaged(&output_output_labels_Device, output_output_labels_Size * sizeof(int));
+    cudaMallocManaged(&output_output_labels_Device, output_output_labels_Size * sizeof(long));
 
-    const int outout_box_size = batchSize * infer.engine->getBindingDimensions(output_boxes_Index).d[1] *
-                                infer.engine->getBindingDimensions(output_boxes_Index).d[2];
-    std::vector<float> output_box_data(outout_box_size);
+    nvinfer1::Dims output_boxes_Dims = infer.engine->getTensorShape(output_boxes_Name);
+    const int output_box_size = batchSize * output_boxes_Dims.d[1] * output_boxes_Dims.d[2];
+    std::vector<float> output_box_data(output_box_size);
     void *output_box_device;
-    cudaMalloc(&output_box_device, outout_box_size * sizeof(float));
+    cudaMallocManaged(&output_box_device, output_box_size * sizeof(float));
 
-    const int output_scores_size = batchSize * infer.engine->getBindingDimensions(output_scores_Index).d[1];
+    nvinfer1::Dims output_scores_Dims = infer.engine->getTensorShape(output_scores_Name);
+    const int output_scores_size = batchSize * output_scores_Dims.d[1];
     std::vector<float> output_score_data(output_scores_size);
     void *output_scores_device;
-    cudaMalloc(&output_scores_device, output_scores_size * sizeof(float));
+    cudaMallocManaged(&output_scores_device, output_scores_size * sizeof(float));
 
     cv::Mat img_resized;
-    // 启动预处理线程
-    std::thread preprocess_thread(preprocess, "/zdrive/data/code/RT-DETR/2024-09-25_10-18.png", std::ref(img_vec),
+    std::thread preprocess_thread(preprocess, "img.png", std::ref(img_vec),
                                   std::ref(img_resized));
 
     // 启动推理线程
@@ -148,30 +165,36 @@ int main() {
                              output_output_labels_Device, output_box_device, output_scores_device,
                              std::ref(output_output_labels_Data), std::ref(output_box_data),
                              std::ref(output_score_data),
-                             output_output_labels_Size, outout_box_size, output_scores_size, std::ref(img_vec),
+                             output_output_labels_Size, output_box_size, output_scores_size, std::ref(img_vec),
                              input_images_Size);
 
-    // 等待线程完成
     preprocess_thread.join();
     infer_thread.join();
 
     for (size_t i = 0; i < output_score_data.size(); i++) {
         const auto &score = output_score_data[i];
         if (score > 0.8) {
-            // 如果分数大于 0.8
-            // 获取对应的矩形框坐标
             const auto &x_min = output_box_data[i * 4];
             const auto &y_min = output_box_data[i * 4 + 1];
             const auto &x_max = output_box_data[i * 4 + 2];
             const auto &y_max = output_box_data[i * 4 + 3];
 
-            // 在图像上绘制矩形框
             cv::rectangle(img_resized,
                           cv::Point(static_cast<int>(x_min), static_cast<int>(y_min)),
                           cv::Point(static_cast<int>(x_max), static_cast<int>(y_max)),
                           cv::Scalar(0, 255, 0), 2); // 绿色框，线条宽度为2
+
+            const auto &cls = output_output_labels_Data[i];
+            std::string label = "Class: " + std::to_string(cls) + ", Score: " + std::to_string(score);
+
+            int text_x = static_cast<int>(x_min);
+            int text_y = static_cast<int>(y_min) - 5; // 防止文本覆盖在框上，稍微向上偏移
+
+            cv::putText(img_resized, label, cv::Point(text_x, text_y),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1); // 绿色文本，字体大小0.5，宽度1
         }
     }
+
 
     cv::imshow("preprocess", img_resized);
     cv::waitKey(0);
