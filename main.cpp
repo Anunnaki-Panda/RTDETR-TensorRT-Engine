@@ -13,8 +13,8 @@ std::condition_variable cv_;
 bool data_ready = false;
 
 // 预处理函数
-void preprocess(const std::string &image_path, std::vector<float> &img_vec, cv::Mat &img_resized) {
-    auto img_raw = cv::imread(image_path);
+void preprocess(const std::string &image_path, std::vector<float> &img_vec, cv::Mat &img_raw) {
+    img_raw = cv::imread(image_path);
     if (img_raw.empty()) {
         std::cerr << "Failed to load image at: " << image_path << std::endl;
         return;
@@ -25,7 +25,7 @@ void preprocess(const std::string &image_path, std::vector<float> &img_vec, cv::
     cv::cvtColor(img_raw, img, cv::COLOR_BGR2RGB);
 
     // 调整尺寸为 640x640
-    // cv::Mat img_resized;
+    cv::Mat img_resized;
     cv::resize(img, img_resized, cv::Size(640, 640));
 
     // 归一化处理（将像素值缩放到 [0, 1]）
@@ -40,7 +40,6 @@ void preprocess(const std::string &image_path, std::vector<float> &img_vec, cv::
             }
         }
     }
-
     // 通知推理线程数据准备就绪
     {
         std::lock_guard<std::mutex> lk(mtx);
@@ -156,9 +155,10 @@ int main() {
     void *output_scores_device;
     cudaMallocManaged(&output_scores_device, output_scores_size * sizeof(float));
 
-    cv::Mat img_resized;
+    cv::Mat img_raw;
     std::thread preprocess_thread(preprocess, "img.png", std::ref(img_vec),
-                                  std::ref(img_resized));
+                                  std::ref(img_raw));
+
 
     // 启动推理线程
     std::thread infer_thread(infer_process, std::ref(infer), input_images_Device, input_orig_target_sizes_Device,
@@ -170,16 +170,22 @@ int main() {
 
     preprocess_thread.join();
     infer_thread.join();
+    const int original_height = img_raw.size().height;
+    const int original_width = img_raw.size().width;
+    const int target_width = 640;
+    const int target_height = 640;
+    const float scale_x = static_cast<float>(original_width) / static_cast<float>(target_width);
+    const float scale_y = static_cast<float>(original_height) / static_cast<float>( target_height);
 
     for (size_t i = 0; i < output_score_data.size(); i++) {
         const auto &score = output_score_data[i];
         if (score > 0.8) {
-            const auto &x_min = output_box_data[i * 4];
-            const auto &y_min = output_box_data[i * 4 + 1];
-            const auto &x_max = output_box_data[i * 4 + 2];
-            const auto &y_max = output_box_data[i * 4 + 3];
+            const auto &x_min = output_box_data[i * 4] * scale_x;
+            const auto &y_min = output_box_data[i * 4 + 1] * scale_y;
+            const auto &x_max = output_box_data[i * 4 + 2] * scale_x;
+            const auto &y_max = output_box_data[i * 4 + 3] * scale_y;
 
-            cv::rectangle(img_resized,
+            cv::rectangle(img_raw,
                           cv::Point(static_cast<int>(x_min), static_cast<int>(y_min)),
                           cv::Point(static_cast<int>(x_max), static_cast<int>(y_max)),
                           cv::Scalar(0, 255, 0), 2); // 绿色框，线条宽度为2
@@ -190,14 +196,13 @@ int main() {
             int text_x = static_cast<int>(x_min);
             int text_y = static_cast<int>(y_min) - 5; // 防止文本覆盖在框上，稍微向上偏移
 
-            cv::putText(img_resized, label, cv::Point(text_x, text_y),
+            cv::putText(img_raw, label, cv::Point(text_x, text_y),
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1); // 绿色文本，字体大小0.5，宽度1
         }
     }
 
 
-    cv::imshow("preprocess", img_resized);
+    cv::imshow("show", img_raw);
     cv::waitKey(0);
-    std::cout << "Hello, World!" << std::endl;
     return 0;
 }
